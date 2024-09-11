@@ -1,142 +1,105 @@
-import time
-import pyproj
 import math
+import numpy as np
 
 
-def update_coordinate(sog, cog, time_interval, initial_x, initial_y):
+def update_ship_state(ship, time_interval):
+    # 从状态集合中提取位置、航速和航向
+    x, y, sog, cog = ship
+    # 将航向转换为弧度
+    cog_rad = math.radians(cog)
+
+    # 计算新的位置
+    new_x = x + sog * math.sin(cog_rad) * time_interval
+    new_y = y + sog * math.cos(cog_rad) * time_interval
+
+    # 更新船舶位置
+    ship[0] = new_x
+    ship[1] = new_y
+
+
+def calculate_angles(rx, ry):
     """
-    按时间生成单条目标船的位置坐标
-    :param sog: 船舶航速
-    :param cog: 船舶航向
-    :param time_interval: 坐标点更新时间间隔
-    :param initial_x: 目标船初始x
-    :param initial_y: 目标船初始y
-    :return: 每一秒更新的位置坐标
+    计算贝叶斯曲线在起点，中间点和终点的和航向
+    :param rx: 轨迹x坐标
+    :param ry: 轨迹y坐标
+    :return: 三个点的切线角度
     """
-    x = initial_x
-    y = initial_y
+    angles = []
+    n = len(rx)
 
-    while True:
-        x += sog * math.sin(math.radians(cog))
-        y += sog * math.cos(math.radians(cog))
+    # 起点切线方向
+    if n > 1:
+        start_tangent = np.array([rx[1] - rx[0], ry[1] - ry[0]])
+        start_tangent /= np.linalg.norm(start_tangent)  # 标准化
+        angle = np.degrees(np.arctan2(start_tangent[0], start_tangent[1]))  # 以y轴正方向为0°
+        angles.append(angle)
 
-        yield (x, y)
+        # 中间点切线方向
+    if n > 2:
+        mid_index = n // 2
+        mid_tangent = np.array([rx[mid_index + 1] - rx[mid_index - 1], ry[mid_index + 1] - ry[mid_index - 1]])
+        mid_tangent /= np.linalg.norm(mid_tangent)  # 标准化
+        angle = np.degrees(np.arctan2(mid_tangent[0], mid_tangent[1]))  # 以y轴正方向为0°
+        angles.append(angle)
 
-        time.sleep(time_interval)
+        # 终点切线方向
+    if n > 1:
+        end_tangent = np.array([rx[-1] - rx[-2], ry[-1] - ry[-2]])
+        end_tangent /= np.linalg.norm(end_tangent)  # 标准化
+        angle = np.degrees(np.arctan2(end_tangent[0], end_tangent[1]))  # 以y轴正方向为0°
+        angles.append(angle)
 
-
-def generate_ship_coordinates(ship_data):
-    """
-    一次更新多艘目标船的位置信息
-    :param ship_data: 定义多个目标船状态信息
-    :return: 多个目标船更新后的位置坐标
-    """
-    ships = []
-    for data in ship_data:
-        sog = data['sog']
-        cog = data['cog']
-        time_interval = data['time_interval']
-        initial_x = data['initial_x']
-        initial_y = data['initial_y']
-        generator = update_coordinate(sog, cog, time_interval, initial_x, initial_y)
-        ships.append(generator)
-
-    while True:
-        positions = []
-        for generator in ships:
-            position = next(generator)
-            positions.append(position)
-        yield positions
+    return angles
 
 
-def convert_latlon_to_xy(lat, lon, src_epsg, dst_epsg):
-    """
-    船舶经纬度转（x，y）坐标：大地坐标系
-    :param lat:
-    :param lon:
-    :param src_epsg:
-    :param dst_epsg:
-    :return: （x，y）坐标
-    """
-    proj = pyproj.Transformer.from_crs(src_epsg, dst_epsg, always_xy=True)
+def ship_ts(lon_os, lat_os):
+    ts_dict = {
+        "tsData": [
+            {
+                "aisShipMmsi": 420002931,
+                "shipName": "YinHe",
+                "shipLength": 160,
+                "shipCos": 0,
+                "shipHdg": 0,
+                "shipPosLat": lat_os + 0.022,
+                "shipPosLon": lon_os - 0.001,
+                "shipSpd": 5
+            },
+            {
+                "aisShipMmsi": 420002932,
+                "shipName": "YinHe",
+                "shipLength": 160,
+                "shipCos": -30,
+                "shipHdg": 0,
+                "shipPosLat": lat_os - 0.01,
+                "shipPosLon": lon_os + 0.04,
+                "shipSpd": 20
+            },
+            # {
+            #     "aisShipMmsi": 420002933,
+            #     "shipName": "YinHe",
+            #     "shipLength": 160,
+            #     "shipCos": 180,
+            #     "shipHdg": 0,
+            #     "shipPosLat": lat_os + 0.05,
+            #     "shipPosLon": lon_os,
+            #     "shipSpd": 15
+            # }
+        ]
+    }
 
-    x, y = proj.transform(lon, lat)  # 经度，纬度的顺序
-
-    return x, y
-
-
-def target_ship(lat_os_start, lon_os_start):
-    """
-    生成多条目标船的状态信息
-    :param lat_os_start: 本船初始纬度
-    :param lon_os_start: 本船初始经度
-    :return: 多条目标船的状态信息,x,y坐标,航速航向
-    """
-    source_epsg = 'EPSG:4326'  # WGS84经纬度坐标系
-    target_epsg = 'EPSG:3857'  # 地理坐标参考系统
-    # ================================================================================================
-    # 设置目标船经纬度，航速航向
-    lat_ts = [lat_os_start + 0.02, lat_os_start - 0.02, lat_os_start + 0.01, lat_os_start]
-    lon_ts = [lon_os_start, lon_os_start - 0.02, lon_os_start - 0.01, lon_os_start + 0.02]
-    cog_ts = [180, 45, 135, 90]
-    sog_ts = [12, 15, 12, 8]
-    # ================================================================================================
-    # 目标船经纬度转x，y坐标
-    x_ts = []
-    y_ts = []
-    for i in range(len(lon_ts)):
-        x, y = convert_latlon_to_xy(lat_ts[i], lon_ts[i], source_epsg, target_epsg)
-        x_ts.append(x)
-        y_ts.append(y)
-    # ================================================================================================
-    # 将对应的目标船信息分配到目标船，目标船根据时间更新位置
-    ship_data = [
-        {
-            'sog': sog_ts[0],
-            'cog': cog_ts[0],
-            'time_interval': 1,
-            'initial_x': x_ts[0],
-            'initial_y': y_ts[0]
-        },
-        {
-            'sog': sog_ts[1],
-            'cog': cog_ts[1],
-            'time_interval': 1,
-            'initial_x': x_ts[1],
-            'initial_y': y_ts[1]
-        },
-        {
-            'sog': sog_ts[2],
-            'cog': cog_ts[2],
-            'time_interval': 1,
-            'initial_x': x_ts[2],
-            'initial_y': y_ts[2]
-        },
-        {
-            'sog': sog_ts[3],
-            'cog': cog_ts[3],
-            'time_interval': 1,
-            'initial_x': x_ts[3],
-            'initial_y': y_ts[3]
-        }
-    ]
-    coordinates_generator = generate_ship_coordinates(ship_data)
-    while True:
-        x_ts = []
-        y_ts = []
-        positions = next(coordinates_generator)
-        for i in range(len(positions)):
-            x_ts.append(positions[i][0])
-            y_ts.append(positions[i][1])
-        yield x_ts, y_ts, cog_ts, sog_ts
-
-
-# if __name__ == "__main__":
-#     lat_os_start, lon_os_start = start_own_ship()
-#     ship_generator = target_ship(lat_os_start, lon_os_start)
-#     while True:
-#         x_ts, y_ts = next(ship_generator)
-#         print(x_ts, y_ts)
+    ts_ships = [
+                    [
+                        ship.get('shipPosLon', None),
+                        ship.get('shipPosLat', None),
+                        ship.get('shipSpd', None),
+                        ship.get('shipCos', None),
+                        ship.get('shipLength', None),
+                        ship.get('aisShipMmsi', None),
+                        ship.get('shipName', None)
+                    ] for ship in ts_dict['tsData']
+                ]
+    return ts_ships
 
 
 

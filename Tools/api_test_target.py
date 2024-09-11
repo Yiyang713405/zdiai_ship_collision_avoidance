@@ -112,6 +112,7 @@ class HttpAPI:
         r = self.S.post(url, data=json.dumps(data), headers=headers)
         return json.loads(r.text)
 
+
 if __name__ == "__main__":
     api = HttpAPI(URL, USER)
     OS_data = api.get_osdata()

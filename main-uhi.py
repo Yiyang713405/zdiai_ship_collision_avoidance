@@ -2,39 +2,30 @@
 # import 此demo需要使用的包
 # --------------------
 import socket
-import pyproj
+import traceback
 from pynput import keyboard
-import csv
+import TargetShipSet
 import time
 import numpy as np
 import matplotlib.pyplot as plt
-from Tools import TargetShipSet
-from Tools import WaypointGet
+from Tools import convert_latlon_to_xy
+from Tools import Encounter_scenario_decision_making
+import path_planning_plot
 from Tools import shipmodle
-from Tools import EvaluationFunction
+import matplotlib.patches as patches
+from matplotlib.patches import Circle
 from Tools import PointDelete
-from service import ip_path_planning
-from service import ip_heading_planning
-from service import ip_controller
 from service import ip_MFAC
 from service import ip_guidance
+import threading
+from service import ip_controller
+from Tools import ip_controller
 from service.tanker_VLCC8_L333 import VLCC8L333
-
 from PlanningAlgorithm import PotentialFieldPlanning
+from PlanningAlgorithm import a_star
 from PlanningAlgorithm import bezier_path
-
 import math
 
-# --------------------
-# import 控制器和规划器
-# --------------------
-# import dzl_heading_planning
-# import ip_class
-# import ip_controller
-
-# -------------------------------------------------------------------------------------
-# 初始化变量
-# --------------------
 # 初始化通信地址和端口
 me_listening_socket = None
 remote_ip = ('127.0.0.1')
@@ -44,17 +35,6 @@ remote_port = int(8080)  # 远端程序（模拟器）监听的端口号
 # remote_port = int(60000)  # 远端程序（模拟器）监听的端口号
 me_sending_port = 50000  # 本demo发出数据使用的端口
 
-# From YuYue
-# me_listening_port = 60000  # 本脚本（控制器）监听的端口号
-# me_listening_socket = None
-# # --------------------
-# remote_ip = ('127.0.0.1')
-# remote_port = int(60001)  # 远端程序（模拟器）监听的端口号
-# me_sending_port = 50000  # 本demo发出数据使用的端口
-# -------------------------------------------------------------------------------------
-
-# -------------------------------------------------------------------------------------
-# 定义模拟器反馈状态-全局变量（有多少个数据出来就要定义 x + 2 个）（以字符串格式）
 # --------------------
 norx = ''  # 帧头
 nory = ''  # 帧尾
@@ -99,16 +79,6 @@ t2 = 0
 ship_param = VLCC8L333()
 
 
-# def on_press(key):
-#     '按下按键时执行。'
-    # try:
-    #     print('alphanumeric key {0} pressed'.format(key.char))
-    #
-    # except AttributeError:
-    #     print('special key {0} pressed'.format(key))
-    # 通过属性判断按键类型。
-
-
 def on_release(key):
     '松开按键时执行。'
     global r1, r2, t1, t2
@@ -147,11 +117,31 @@ def on_release(key):
         return False
 
 
+def calculate_direction_angle(X1, Y1, X2, Y2):
+    vec_AB = (X2 - X1, Y2 - Y1)
+
+    angle_rad = math.atan2(vec_AB[0], vec_AB[1])
+    angle_deg = math.degrees(angle_rad)
+
+    if angle_deg < 0:
+        angle_deg += 360
+
+    return angle_deg
+
+
 def listen_channel_func():
     # ================================
     # 与目标端口建立通信
     # ================================
     try:
+        # ====================================================================================================
+        # 参数历史数据保存
+        history_trajectory_os = []  # 记录历史轨迹
+        history_trajectory_ts = []  # 记录历史轨迹
+        history_distance = []
+        history_dcpa = []
+        history_tcpa = []
+        # =====================================================================================================
         print("建立监听,本地监听端口号是：%s" % (me_listening_port,))
         me_listening_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         me_listening_socket.bind(('', me_listening_port))
@@ -160,244 +150,155 @@ def listen_channel_func():
         # 首次接收数据
         receive_data, remote_address = me_listening_socket.recvfrom(1024)
         a = receive_data.decode('utf-8')
-
-        # 数据处理
-        (norx, hdsRudderPS, hdsRudderSB, hdsTelePS, hdsTeleSB, hdsThrBow, hdsThrStern, Latitude, Longitude,
-         LateralSpeed, LongitudinalSpeed, Heading, NEDe, NEDn, Pitch, Roll, nory) = a.split(',')
-        lat_os_start = float(Latitude)
-        lon_os_start = float(Longitude)
-        ship_generator = TargetShipSet.target_ship(lat_os_start, lon_os_start)
         # 获得本船首个位置
         # ================================================================================================
-        # ================================================================================================
-        # 开始循环接受处理数据
+        (norx, hdsRudderPS, hdsRudderSB, hdsTelePS, hdsTeleSB, hdsThrBow, hdsThrStern, Latitude, Longitude,
+         LateralSpeed, LongitudinalSpeed, Heading, NEDe, NEDn, Pitch, Roll, nory) = a.split(',')
+        # os 数据获取
+        lat_os_start = float(Latitude)
+        lon_os_start = float(Longitude)
+        lat_speed_start = float(LateralSpeed)
+        lon_speed_start = float(LongitudinalSpeed)
+        sog_os_start = np.sqrt(lat_speed_start ** 2 + lon_speed_start ** 2)
+        cog_os_start = float(Heading)
+        # ========================================================================
+        # os数据转化
+        os_ship_start = [lon_os_start, lat_os_start, sog_os_start, cog_os_start]
+        os_ship_start = convert_latlon_to_xy.ship_latlon_to_xy(os_ship_start)
+        reference_point_x = os_ship_start[0]
+        reference_point_y = os_ship_start[1]
+        # os_ship_start[2] = os_ship_start[2] * 0.51444 # 模拟器输出的航速是m/s
+        sog_os_min = 0.5 * os_ship_start[2]
+        # =========================================================================
+        #  ts 数据获取转化
+        ts_data = TargetShipSet.ship_ts(lon_os_start, lat_os_start)
+        ts_ships = []  # 定于空列表存放目标船数据
+        ts_ships_length = []  # 定义空列表存放目标船船长
+        ts_ships_mmsi = []  # 定义空列表存放目标船mmsi
+        ts_ships_name = []  # 定义空列表存放目标船船名
+        for i in range(len(ts_data)):
+            ts_ships.append([])
+            history_trajectory_ts.append([])
+            history_distance.append([])
+            history_dcpa.append([])
+            history_tcpa.append([])
+        for i in range(len(ts_ships)):
+            ts_ships_length.append(ts_data[i][-3])
+            ts_ships_mmsi.append(ts_data[i][-2])
+            ts_ships_name.append(ts_data[i][-1])
+            ts_data[i] = ts_data[i][:-3]
+            ts_ships[i] = convert_latlon_to_xy.ship_latlon_to_xy(ts_data[i])
+            ts_ships[i][2] = ts_ships[i][2] * 0.51444
+            # # roll_os = 0.1
+        time_interval = 1
+        m = 1852  # 1 海里 = 1852 米
+        safe_tcpa = 10
+        safe_dcpa = 1
+        invariant_waypoint = []
+        for i in range(len(ts_ships)):
+            ts_ships[i][0] = ts_ships[i][0] - os_ship_start[0]
+            ts_ships[i][1] = ts_ships[i][1] - os_ship_start[1]
+        # 绘图窗口建立
+        # =====================================================================================================
         plt.ion()
-        fig, axes = plt.subplots()
+        # 创建一个包含 2x2 子图的图形
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
         plt.gcf().canvas.mpl_connect('key_release_event', lambda event: [exit(0) if event.key == 'escape' else None])
-        start_point = [0, 0]
-        start_x = start_point[0]
-        start_y = start_point[1]
-        Mile2m = 1852
-        source_epsg = 'EPSG:4326'  # WGS84经纬度坐标系
-        target_epsg = 'EPSG:3857'  # 地理坐标参考系统
         while True:
-            # ================================================================================================
-            # ================================================================================================
-            # 接收模拟器本船的数据
-            # 获得自定义目标船数据并完成坐标系转换
             receive_data, remote_address = me_listening_socket.recvfrom(1024)
             a = receive_data.decode('utf-8')
-
-            # 数据处理
-            # print('使用逗号获取子串:', a.split(','))
             (norx, hdsRudderPS, hdsRudderSB, hdsTelePS, hdsTeleSB, hdsThrBow, hdsThrStern, Latitude, Longitude,
              LateralSpeed, LongitudinalSpeed, Heading, NEDe, NEDn, Pitch, Roll, nory) = a.split(',')
             lat_os = float(Latitude)
             lon_os = float(Longitude)
             cog_os = float(Heading)
             lat_speed = float(LateralSpeed)
-            lon_speed = float(Longitude)
+            lon_speed = float(LongitudinalSpeed)
             roll_os = float(Roll)
             sog_os = np.sqrt(lat_speed ** 2 + lon_speed ** 2)
-            print("cog_os,sog_os:", cog_os, sog_os)
-            NEDe = float(NEDe)
-            NEDn = float(NEDn)
-            x_os, y_os = TargetShipSet.convert_latlon_to_xy(lat_os, lon_os, source_epsg, target_epsg)
-            x_ts, y_ts, cog_ts, sog_ts = next(ship_generator)
-            for i in range(len(x_ts)):
-                x_ts[i] = x_ts[i] - x_os
-                y_ts[i] = y_ts[i] - y_os
-            x_os = x_os - x_os
-            y_os = y_os - y_os
             # ================================================================================================
             # ================================================================================================
-            # 计算路径点
-            (waypoint, min_index, x_recognizable, y_recognizable, dcpa_recognizable, tcpa_recognizable,
-             cal, cpa) = WaypointGet.WaypointGet(cog_os, sog_os, x_os, y_os, cog_ts, sog_ts, x_ts, y_ts)
-            # print(closest_point_of_approach)
-            icon_all, icon_risk, icon_cpa = shipmodle.shipmodle(cog_ts, x_ts, y_ts, cog_os, x_os, y_os)
+            #  本船与目标船数据获取与转换
+            # ====================================================
+            os_ship = [lon_os, lat_os, sog_os, cog_os]
+            os_ship = convert_latlon_to_xy.ship_latlon_to_xy(os_ship)
+            os_ship[0] = os_ship[0] - os_ship_start[0]
+            os_ship[1] = os_ship[1] - os_ship_start[1]
+            # os_ship[2] = os_ship[2] * 0.51444  # 模拟器本船速度未
+            for i in range(len(ts_ships)):
+                TargetShipSet.update_ship_state(ts_ships[i], time_interval)
+            # ===================================================================================================
+            # 计算避碰算法参数
+            (waypoint, cpa, avoid_ship_label, colAvoShipCount, colAvoNegShipCount, colAvoEmgShipCount, osAvoResp,
+             shipMeetProp, shipColAvoProp, shipDCPA, shipTCPA, shipBearing, shipDistance, os_shipBearing) \
+                = (Encounter_scenario_decision_making.multi_ship_scenario_waypoint(
+                   os_ship, ts_ships, safe_dcpa, safe_tcpa, sog_os_min, ts_ships_length, 20))
+            direct_waypoint = [os_ship[0] + sog_os * math.sin(math.radians(cog_os)) * safe_tcpa * 60,
+                               os_ship[1] + sog_os * math.cos(math.radians(cog_os)) * safe_tcpa * 60]
+            # ==========================================================================================================
+            # 固定路径点，在船舶有风险时路径点随风险情况改变，无风险时路径点锁定锁定
+            if len(invariant_waypoint) == 0:
+                invariant_waypoint.append(waypoint)
+                print("0")
+            else:
+                distance_to_waypoint = (Encounter_scenario_decision_making.calculate_distance
+                                        (os_ship[0], os_ship[1], invariant_waypoint[0][0], invariant_waypoint[0][1]))
+                os_waypoint_vector = [invariant_waypoint[0][0] - os_ship[0], invariant_waypoint[0][1] - os_ship[1]]
+                v_os = np.array([sog_os * math.sin(math.radians(cog_os)), sog_os * math.cos(math.radians(cog_os))])
+                angle_os_waypoint = Encounter_scenario_decision_making.angle_of_vector(v_os, os_waypoint_vector)
+                # print(avoid_ship_label)
+                # print(waypoint, invariant_waypoint)
+                # print(waypoint, direct_waypoint)
+                if (avoid_ship_label != float('inf') and waypoint != invariant_waypoint[0]  # 判断是否要更新路径点
+                        and waypoint != direct_waypoint):
+                    invariant_waypoint[0] = waypoint
+                elif distance_to_waypoint < 150 or angle_os_waypoint > 90 or os_ship[0] >= 2 * 1852:
+                    # 判断是否到达路径点
+                    invariant_waypoint.clear()
+                    invariant_waypoint.append(waypoint)
+                elif avoid_ship_label == float('inf'):  # 判断何时回到原航向
+                    # avoid_num = 0
+                    # for i in range(len(ts_ships)):
+                    #     if -180 <= shipBearing[i] <= -90 or 90 <= shipBearing[i] <= 180:
+                    #         avoid_num += 1
+                    # if avoid_num == len(ts_ships) or min(shipDCPA) >= 1.5 * 1852:
+                    if max(abs(value) for value in shipTCPA) == 0 and abs(os_ship[0]) >= 1.5 * 1852:
+                        towing_point = [
+                            os_ship[0] + os_ship[2] * math.sin(math.radians(cog_os_start)) * 10 * 60,
+                            os_ship[1] + os_ship[2] * math.cos(math.radians(cog_os_start)) * 10 * 60]
+                        invariant_waypoint[0] = towing_point
+                        print("shipTCPA:", shipTCPA)
             # ================================================================================================
-            # ================================================================================================
-            # 路径规划算法接入
-
-            obstacles_y = y_ts
-            obstacles_x = x_ts
-            end_point = waypoint
-            goal_x = end_point[0]
-            goal_y = end_point[1]
-
-            '''---------------------APF---start------------------------------'''
-            # grid_size = 0.1  # Resolution of the potential rho (m)
-            # area_radius = 0.5  # Potential area radius (m)
-            # rx_apf, ry_apf = PotentialFieldPlanning.potential_field_planning(start_x, start_y, goal_x, goal_y,
-            #                                                                  obstacles_x,
-            #                                                                  obstacles_y, grid_size, area_radius)
-            '''---------------------APF---end---------------------------------'''
-            '''---------------------AStar---start-----------------------------'''
-            # ASPlanner = a_star.AStarPlanner(obstacles_x, obstacles_y, grid_size, area_radius)
-            # rx_astar, ry_astar = ASPlanner.planning(start_x, start_y, goal_x, goal_y)
-            '''---------------------AStar---end-----------------------------'''
-            '''---------------------bezier_path---start------------------------------'''
-            print(cog_os)
-            angle_trans = (360 - cog_os) % 360
-            angle_trans = (angle_trans + 90) % 360  # 将顺时针纵轴向上为0°的角度数据转化为逆时针横轴向右为0°的角度数据
-            start_yaw = np.radians(angle_trans)
-            end_yaw = start_yaw
-            path, control_points = bezier_path.calc_4points_bezier_path(start_x, start_y, start_yaw, goal_x, goal_y, end_yaw, offset=3)
-            rx_bezier = path.T[0]
-            ry_bezier = path.T[1]
-            '''---------------------bezier_path---start------------------------------'''
-            rx = rx_bezier
-            ry = ry_bezier
-            rxy = np.vstack((rx, ry)).T
-            # lenth = len(rx)
-            # rx_for_redis = rx_apf * Mile2m
-            # ry_for_redis = ry_apf * Mile2m
-            path_length = EvaluationFunction.cal_path_length(rx, ry)
-            print('path length=', path_length)
-            # select_num = 15
-            select_num = round(path_length / ship_param.hull.LPP)
-            print('select num=', select_num)
-            rxfinal = EvaluationFunction.select_elements(rx, select_num)
-            ryfinal = EvaluationFunction.select_elements(ry, select_num)
-            rxyfinal = np.vstack((rxfinal, ryfinal)).T
-
-            # ================================================================================================
-            # ================================================================================================
-            # 控制算法接入
-            ship_param.e = x_os
-            ship_param.n = y_os
-            ship_param.psi_deg = cog_os
-
-            OS_state = [0, 0, cog_os, sog_os]
-            track_point = rxy[1, :]
-            h = 10
-            psi_controller = ip_MFAC.RO_MFAC(rho=1.8, lamda=0.26, eta=0.36, mu=0.5, phi1=0.1, epsilon=0.001, K1=13,
-                                             output_min=-math.pi / 12, output_max=math.pi / 12)
-            heading_cmd, speed_cmd = ip_guidance.Point_track().solve(OS_state, track_point, h)
-            print(heading_cmd, speed_cmd)
-            delta_cmd_deg = psi_controller.solve(np.deg2rad(heading_cmd), np.deg2rad(cog_os), np.deg2rad(roll_os))
-            ship_rpm = 10
-
-            # path_plan = ip_path_planning.Path()
-            # path_plan.add_point(rxyfinal)
-            # heading_planner = ip_heading_planning.LOS()
-            # heading_controller = ip_controller.PID(sample_time=0.01, kp=3.0, ki=0.03, kd=0.06,
-            #                                        output_min=-35.0, output_max=35.0)
-            # ship_param.psi_cmd_deg = heading_planner.solve(ship_param, path_plan)
-            # print(ship_param.psi_cmd_deg)
-            # ship_param.rudder.delta_cmd_deg = heading_controller.solve(ship_param.psi_cmd_deg, ship_param.psi_deg)
-            # print(ship_param.rudder.delta_cmd_deg)
-            # ship_rpm = 10
-
-            # # 基础显示：
-            # print("接收到的原始数据为:    %s" % a)
-            # print("接收到的原始数据为:    %s" % data)
-            # print('当前航向：  %s     当前东向位移与北向位移： %s    %s' % (Heading, NEDe, NEDn))  #输出变量
-            # print('LOS计算航向角：   %f' % psi_cmd_deg)
-            # print('PID计算控制舵角:   %f' % delta_cmd_deg)
-            # # delta_cmd_deg = 7
-            #
-            # # ================================
-            # #发送算法指令给目标端口
-            send_channel_func(delta_cmd_deg, ship_rpm)
-
-            # ================================================================================================
-            # ================================================================================================
-            # 绘图
-            x_os = x_os / Mile2m
-            y_os = y_os / Mile2m
-            x_ts = [element / Mile2m for element in x_ts]
-            y_ts = [element / Mile2m for element in y_ts]
-            if len(x_recognizable) != 0:
-                x_recognizable = [element / Mile2m for element in x_recognizable]
-                y_recognizable = [element / Mile2m for element in y_recognizable]
-            rx = [element / Mile2m for element in rx]
-            ry = [element / Mile2m for element in ry]
-            waypoint_plot = [element / Mile2m for element in waypoint]
-            # print(waypoint_plot, min_index)
-
-            axes.clear()
-            axes.axis('equal')
-            for i in range(len(x_ts)):
-                axes.scatter(x_ts[i], y_ts[i], marker=icon_all[i], s=10, facecolor="none", edgecolors="black")
-                axes.text(x_ts[i], y_ts[i] + 0.2, f"Target{i + 1}", ha="center", family='sans-serif', size=8)
-            axes.scatter(x_os, y_os, marker=icon_all[-1], s=10, facecolor="none", edgecolors="black")
-            if len(x_recognizable) != 0:
-                for i in range(len(x_recognizable)):
-                    axes.scatter(x_recognizable[i], y_recognizable[i], marker=icon_risk[i], s=10, facecolor="orange",
-                                 edgecolors="black")
-                    axes.text(x_recognizable[i]+0.3, y_recognizable[i]-0.3,
-                              f"dcpa:{dcpa_recognizable[i]} m\n tcpa:{tcpa_recognizable[i]} s\n cal:{cal[i]}",
-                              ha="center", family='sans-serif', size=8)
-                    if min_index != 'none':
-                        axes.scatter(x_recognizable[min_index], y_recognizable[min_index], marker=icon_risk[min_index],
-                                     s=10, facecolor="red", edgecolors="black")
-                        if cal[i] == 1:
-                            axes.scatter(cpa[min_index][0] / Mile2m, cpa[min_index][1] / Mile2m,
-                                         marker=icon_cpa[min_index],
-                                         s=10, facecolor="none", edgecolors="black", linestyle='--')
-            axes.scatter(x_os, y_os, s=10, alpha=0.3, marker=icon_all[-1], facecolor="black", edgecolors="black")
-            axes.text(x_os, y_os - 0.2, 'OwnShip', ha="center", family='sans-serif', size=8)
-            axes.scatter(waypoint_plot[0], waypoint_plot[1], s=50, marker='*', color='r')
-            axes.text(waypoint_plot[0], waypoint_plot[1] + 0.1, f'WayPoint_{min_index}', ha="center", family='sans-serif', size=8)
-            deg = list(range(0, 360, 5))
-            deg.append(0)
-            xl2 = [1000 / Mile2m * math.cos(np.deg2rad(d)) for d in deg]
-            yl2 = [1000 / Mile2m * math.sin(np.deg2rad(d)) for d in deg]
-            plt.plot(xl2, yl2, 'r')
-            axes.plot(rx, ry, color="b", linestyle="-", label="Planned Path")
-            axes.grid(True)
-            axes.grid(color='black', linestyle='--', linewidth=0.3, alpha=0.3)
-            axes.set_xlabel('x(n mile)')
-            axes.set_ylabel('y(n mile)')
-            axes.legend(loc="upper left")
-            axes.grid(True)
-            # 显示图形并暂停1秒
-            waypoint.clear()
-            x_ts.clear()
-            y_ts.clear()
-            plt.pause(1)
-            axes.clear()  # 清除之前的图形
-            # # ================================
-    except:
+            # 记录本船和目标船历史数据
+            history_trajectory_os.append((os_ship[0], os_ship[1]))
+            for i in range(len(ts_ships)):
+                history_trajectory_ts[i].append((ts_ships[i][0], ts_ships[i][1]))
+            for i in range(len(history_distance)):
+                history_distance[i].append(shipDistance[i])
+                history_dcpa[i].append(shipDCPA[i])
+                history_tcpa[i].append(shipTCPA[i])
+            # ==========================================================================================================
+            path_planning_plot.path_planning_plot(invariant_waypoint[0], cpa, avoid_ship_label, colAvoShipCount,
+                                                  colAvoNegShipCount, colAvoEmgShipCount, osAvoResp,
+                                                  shipMeetProp, shipColAvoProp, shipDCPA, shipTCPA, shipBearing,
+                                                  shipDistance, os_ship, ts_ships, reference_point_x, reference_point_y,
+                                                  ts_ships_mmsi, ts_ships_name, calculate_direction_angle,
+                                                  history_trajectory_os, history_trajectory_ts, history_distance,
+                                                  history_dcpa, history_tcpa, axes, os_shipBearing)
+    except Exception as e:
         print("建立监听失败，退出监听remote数据")
+        print("错误信息:", str(e))  # 输出错误信息
+        traceback.print_exc()  # 输出详细的错误堆栈信息
     finally:
         print("建立监听成功！")
         if me_listening_socket is not None:
-            me_listening_socket.close()
+            # me_listening_socket.close()
             me_listening_socket = None
 
 
-def send_channel_func(delta_cmd_deg, rpm):
-    # ================================
-    # sending part for send data
-    # ================================
-    global remote_ip
-    global remote_port
-    global me_sending_port
-
-    me_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    me_socket.bind(('', me_sending_port))
-
-    # ================================
-    # 代入端口接受格式
-    # ================================
-    msg = ('$LUPWM,' + str(delta_cmd_deg) + ',' + str(r2) + ',' + str(t1) + ',' + str(rpm) + '\x0a')  # 控拖轮
-    # msg = ('$LUPWM,' + str(r1) + ',' + str(t1) + '\x0a')
-    print(msg)
-    me_socket.sendto(msg.encode("utf-8"), (remote_ip, remote_port))
-
-    if me_socket is not None:
-        me_socket.close()
-        me_socket = None
-
-
 if __name__ == "__main__":
-    # # # X = listen_channel_func()
-    # listen_thread = Thread(target=listen_channel_func)
-    # listen_thread.start()
-    #
-    # with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-    #     listener.join()
     listen_channel_func()
+    # ship_rpm = 10
+    # delta_cmd_deg = [0]
+    # for i in range(len(delta_cmd_deg)):
+    #     send_channel_func(delta_cmd_deg[i], ship_rpm)
