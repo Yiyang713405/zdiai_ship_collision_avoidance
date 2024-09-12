@@ -21,6 +21,8 @@ from PlanningAlgorithm import PotentialFieldPlanning
 from PlanningAlgorithm import a_star
 from PlanningAlgorithm import bezier_path
 import math
+import time
+import producer_rabbitmq
 
 # 初始化通信地址和端口
 me_listening_socket = None
@@ -30,7 +32,11 @@ remote_port = int(8080)  # 远端程序（模拟器）监听的端口号
 # me_listening_port = 60001  # 本脚本（控制器）监听的端口号
 # remote_port = int(60000)  # 远端程序（模拟器）监听的端口号
 me_sending_port = 50000  # 本demo发出数据使用的端口
-
+rabbitmq_host = '172.16.2.198'
+rabbitmq_port = 5672
+rabbitmq_username = 'guest'
+rabbitmq_password = 'guest'
+vhost = '/'
 # --------------------
 norx = ''  # 帧头
 nory = ''  # 帧尾
@@ -99,11 +105,23 @@ def send_channel_func(delta_cmd_deg, rpm):
         me_socket = None
 
 
+def calculate_direction_angle(X1, Y1, X2, Y2):
+    vec_AB = (X2 - X1, Y2 - Y1)
+
+    angle_rad = math.atan2(vec_AB[0], vec_AB[1])
+    angle_deg = math.degrees(angle_rad)
+
+    if angle_deg < 0:
+        angle_deg += 360
+
+    return angle_deg
+
+
 def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCount, colAvoNegShipCount, colAvoEmgShipCount,
                        osAvoResp, shipMeetProp, shipColAvoProp, shipDCPA, shipTCPA, shipBearing, shipDistance,
                        os_ship, ts_ships, reference_point_x, reference_point_y, ts_ships_mmsi, ts_ships_name,
-                       calculate_direction_angle, history_trajectory_os, history_trajectory_ts, history_distance,
-                       history_dcpa, history_tcpa, axes, os_shipBearing):
+                       history_trajectory_os, history_trajectory_ts, history_distance,
+                       history_dcpa, history_tcpa, axes, os_shipBearing, start_time):
     m = 1852
     obstacles_y = []
     obstacles_x = []
@@ -173,7 +191,8 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
         # 如果 rx_bezier 中的点少于10个，直接取所有点
         sampled_rx = rx_bezier
         sampled_ry = ry_bezier
-        # 转化成经纬度
+    # ==========================================================================================================
+    # 转化成经纬度
     sampled_rx = [element + reference_point_x for element in sampled_rx]
     sampled_ry = [element + reference_point_y for element in sampled_ry]
     fastShipPos = convert_latlon_to_xy.ship_xy_to_latlon(sampled_rx, sampled_ry)
@@ -185,12 +204,14 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
         shipColAvoCos = shipColAvoCos + 360
     if shipColAvoCos == 360:
         shipColAvoCos = 0
+    end_time = time.time()
+    CalTime = round((end_time - start_time) * 1000, 2)
     # ==========================================================================================================
     # 计算参数输出
     colAvoData = {
         "colAvoShipCount": colAvoShipCount,
         "colAvoNegShipCount": colAvoNegShipCount,
-        "colAvoEmgShipCount": colAvoEmgShipCount
+        "colAvoEmgShipCount": colAvoEmgShipCount,
     }
     colAvoCosSpdData = {
         "shipColAvoCos": shipColAvoCos,
@@ -200,11 +221,11 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
         "fastColAvoCos3": angles[2],
         "osAvoResp": osAvoResp
     }
-    colAvoPathData_keys = ['fastShipPosLon', 'fastShipPosLat']
+    colAvoPathData_keys = ["fastShipPosLon", "fastShipPosLat"]
     colAvoPathData_value = fastShipPos
     colAvoPathData = [dict(zip(colAvoPathData_keys, values)) for values in colAvoPathData_value]
-    colAvoShipData_keys = ['shipMMSIID', 'shipName', 'shipMeetProp', 'shipColAvoProp', 'shipDCPA',
-                           'shipTCPA', 'shipBearing', 'shipDistance']
+    colAvoShipData_keys = ["shipMmssiId", "shipName", "shipMeetProp", "shipColAvoProp", "shipDcpa",
+                           "shipTcpa", "shipBearing", "shipDistance"]
     colAvoShipData_value = []
     for i in range(len(ts_ships)):
         colAvoShipData_value.append([])
@@ -215,13 +236,29 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     colAvoShipData = [dict(zip(colAvoShipData_keys, values)) for values in colAvoShipData_value]
     send_data = {
         "code": 200,
-        "msg": "请求成功",
-        "colAvoData": colAvoData,
         "colAvoCosSpdData": colAvoCosSpdData,
-        " colAvoPathData": colAvoPathData,
-        "colAvoShipData": colAvoShipData
+        "colAvoData": colAvoData,
+        "colAvoPathData": colAvoPathData,
+        "colAvoShipData": colAvoShipData,
+        "msg": "请求成功"
     }
-    # print(send_data)
+    print(send_data)
+    # ==========================================================================================================
+    # 将决策数据发送到交换机
+    # producer_rabbitmq.setup_fanout_exchange_and_queue(
+    #     rabbitmq_host,
+    #     rabbitmq_port,
+    #     rabbitmq_username,
+    #     rabbitmq_password,
+    #     vhost,
+    #     exchange_name='COLAVO_TO_IVS_EXCHANGE',
+    #     queue_name='COLAVO_TO_IVS_QUEUE'
+    # )
+    producer_rabbitmq.send_message_to_fanout_exchange(rabbitmq_host, rabbitmq_port, rabbitmq_username,
+                                                      rabbitmq_password, vhost,
+                                                      exchange_name='COLAVO_TO_IVS_EXCHANGE',
+                                                      message=send_data
+                                                      )
     # =========================================================================================================
     # 发送控制指令
     target_heading = calculate_direction_angle(x_os, y_os, invariant_waypoint[0], invariant_waypoint[1])
@@ -237,7 +274,7 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     # 控制模块输出——>>船舶操纵模型（虚拟）/舵机（实船）：
     delta_cmd_deg = (
         # ip_controller.PID(kp=0.5, ki=0.2, kd=0.02, output_min=-30, output_max=30).solve(cog_os, target_angle))
-        ip_controller.PID(kp=2, ki=0.2, kd=0.02, output_min=-10, output_max=10).solve(cog_os, target_angle))
+        ip_controller.PID(kp=2, ki=0.2, kd=0.02, output_min=-30, output_max=30).solve(cog_os, target_angle))
     print(delta_cmd_deg)
     send_channel_func(delta_cmd_deg, ship_rpm)
     # 参数单位转换
@@ -276,8 +313,8 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     axes[0, 0].scatter(invariant_waypoint[0] / m, invariant_waypoint[1] / m, s=50, marker='*', color='r', label='Waypoint')
     axes[0, 0].scatter(cpa[0] / m, cpa[1] / m, s=50, marker='*', color='black', label='CPA')
     if avoid_ship_label != float('inf'):
-        axes[0, 0].plot([ts_ships[avoid_ship_label][0] / m, cpa[0] / m],
-                        [ts_ships[avoid_ship_label][1] / m, cpa[1] / m], color="grey", linestyle="--")
+        axes[0, 0].plot([ts_ships[int(avoid_ship_label)][0] / m, cpa[0] / m],
+                        [ts_ships[int(avoid_ship_label)][1] / m, cpa[1] / m], color="grey", linestyle="--")
         # 绘制轨迹
     axes[0, 0].plot(trajectory_os_x, trajectory_os_y, color="r", linestyle="-", label="Ship Trajectory")
     for i in range(len(trajectory_ts_x)):
@@ -303,13 +340,13 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
 
     for i in range(len(distance)):
         axes[1, 0].plot(range(len(distance[i])), distance[i], color=color_set[i], linestyle="-",
-                        label=f"Distance of {ts_ships_mmsi[i]}")
+                        label=f"{ts_ships_mmsi[i]}")
     for i in range(len(dcpa)):
         axes[0, 1].plot(range(len(dcpa[i])), dcpa[i], color=color_set[i], linestyle="-",
-                        label=f"DCPA of {ts_ships_mmsi[i]}")
+                        label=f"{ts_ships_mmsi[i]}")
     for i in range(len(tcpa)):
         axes[1, 1].plot(range(len(tcpa[i])), tcpa[i], color=color_set[i], linestyle="-",
-                        label=f"TCPA of {ts_ships_mmsi[i]}")
+                        label=f"{ts_ships_mmsi[i]}")
         # 更新坐标轴范围
 
     def update_axes():
@@ -330,7 +367,7 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     axes[0, 1].grid()
 
     axes[1, 0].set_xlabel('t [s]')
-    axes[1, 0].set_ylabel('distance [kn]')
+    axes[1, 0].set_ylabel('Distance [kn]')
     axes[1, 0].set_title('Distance to risk_ship')
     axes[1, 0].grid()
 
@@ -354,8 +391,8 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     axes[0, 2].axhline(0, color='black', linewidth=0.5, ls='--')
     axes[0, 2].axvline(0, color='black', linewidth=0.5, ls='--')
     axes[0, 2].set_title('Ts relative position angle')
-    axes[0, 2].set_xlabel('X [°]')
-    axes[0, 2].set_ylabel('Y [°]')
+    axes[0, 2].set_xlabel('X')
+    axes[0, 2].set_ylabel('Y')
     axes[0, 2].grid()
 
     # 绘制本船相对目标船位置角度
@@ -373,8 +410,8 @@ def path_planning_plot(invariant_waypoint, cpa, avoid_ship_label, colAvoShipCoun
     axes[1, 2].axhline(0, color='black', linewidth=0.5, ls='--')
     axes[1, 2].axvline(0, color='black', linewidth=0.5, ls='--')
     axes[1, 2].set_title('Os relative position angle')
-    axes[1, 2].set_xlabel('X [°]')
-    axes[1, 2].set_ylabel('Y [°]')
+    axes[1, 2].set_xlabel('X')
+    axes[1, 2].set_ylabel('Y')
     axes[1, 2].grid()
 
     axes[0, 1].legend(loc='upper left')

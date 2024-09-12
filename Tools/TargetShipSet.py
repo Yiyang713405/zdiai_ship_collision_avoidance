@@ -59,31 +59,31 @@ def ship_ts(lon_os, lat_os):
                 "aisShipMmsi": 420002931,
                 "shipName": "YinHe",
                 "shipLength": 160,
-                "shipCos": 0,
+                "shipCos": -90,
                 "shipHdg": 0,
-                "shipPosLat": lat_os + 0.022,
-                "shipPosLon": lon_os - 0.001,
-                "shipSpd": 5
+                "shipPosLat": lat_os + 0.035,
+                "shipPosLon": lon_os + 0.035,
+                "shipSpd": 12
             },
-            {
-                "aisShipMmsi": 420002932,
-                "shipName": "YinHe",
-                "shipLength": 160,
-                "shipCos": -30,
-                "shipHdg": 0,
-                "shipPosLat": lat_os - 0.01,
-                "shipPosLon": lon_os + 0.04,
-                "shipSpd": 20
-            },
+            # {
+            #     "aisShipMmsi": 420002932,
+            #     "shipName": "YinHe",
+            #     "shipLength": 160,
+            #     "shipCos": 15,
+            #     "shipHdg": 0,
+            #     "shipPosLat": lat_os - 0.01,
+            #     "shipPosLon": lon_os - 0.015,
+            #     "shipSpd": 17
+            # },
             # {
             #     "aisShipMmsi": 420002933,
             #     "shipName": "YinHe",
             #     "shipLength": 160,
-            #     "shipCos": 180,
+            #     "shipCos": 15,
             #     "shipHdg": 0,
-            #     "shipPosLat": lat_os + 0.05,
-            #     "shipPosLon": lon_os,
-            #     "shipSpd": 15
+            #     "shipPosLat": lat_os - 0.005,
+            #     "shipPosLon": lon_os - 0.015,
+            #     "shipSpd": 14
             # }
         ]
     }
