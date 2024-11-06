@@ -171,7 +171,7 @@ def send_ships_to_redis_as_strings(redis_host, redis_port, redis_password, db_ts
 
 def main():
     # Replace with your RabbitMQ connection parameters
-    rabbitmq_host = '192.168.0.11'
+    rabbitmq_host = '172.16.2.198'
     rabbitmq_port = 5672
     rabbitmq_username = 'guest'
     rabbitmq_password = 'guest'

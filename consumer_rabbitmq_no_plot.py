@@ -2,7 +2,7 @@ import numpy as np
 from Tools import convert_latlon_to_xy
 from Tools import Encounter_scenario_decision_making
 from Tools import PointDelete
-import invariant_waypoint_update
+from Tools import invariant_waypoint_update
 import os
 from PlanningAlgorithm import bezier_path
 from global_land_mask import globe
@@ -461,7 +461,7 @@ if __name__ == "__main__":
         try:
             # ==========================================================================================================
             # 连接参数
-            rabbitmq_host = '192.168.0.11'
+            rabbitmq_host = '172.16.2.198'
             rabbitmq_port = 5672
             rabbitmq_username = 'guest'
             rabbitmq_password = 'guest'
